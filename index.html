@@ -1,0 +1,1761 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>نظام الفاتورة السريعة للمؤسسات</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Configure Tailwind to support RTL direction and custom font -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        sans: ['Inter', 'Tahoma', 'Arial', 'sans-serif'],
+                    },
+                },
+            }
+        }
+    </script>
+    <style>
+        /* Global Styles for Desktop Look */
+        body {
+            font-family: 'Inter', Tahoma, Arial, sans-serif;
+            background-color: #9ac5cf;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+        .desktop-app-container {
+            width: 95%;
+            max-width: 1200px;
+            min-height: 90vh;
+            background: rgb(143, 181, 180);
+            border-radius: 1rem;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column; 
+        }
+
+        /* Utility for line clamping */
+        .line-clamp-2 {
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+
+        /* Styles for the Circular Progress (Dashboard) */
+        .progress-circle {
+            transform: rotate(-90deg); /* Start the circle from the top */
+        }
+        .progress-circle-bg {
+            stroke-width: 10;
+            stroke: #acb6f4; /* light blue/gray background */
+        }
+        .progress-circle-fill {
+            stroke-width: 10;
+            stroke: #0d9488; /* teal fill color */
+            stroke-linecap: round;
+            transition: stroke-dashoffset 0.5s ease-out;
+        }
+
+        /* Print styles - Ensure professional printing */
+        @media print {
+            body * {
+                visibility: hidden;
+            }
+            #invoice-print-area, #invoice-print-area * {
+                visibility: visible;
+            }
+            #invoice-print-area {
+                position: absolute;
+                left: 0;
+                top: 0;
+                width: 100%;
+                /* Reset margins and padding for clean printing */
+                margin: 0 !important;
+                padding: 0 !important;
+                box-shadow: none !important;
+                display: flex;
+                flex-direction: column;
+                min-height: 100vh; /* Use full height for A4 look */
+            }
+            .no-print {
+                display: none !important;
+            }
+            .header-section {
+                flex-shrink: 0;
+            }
+            .footer-section {
+                margin-top: auto; /* Push footer to the bottom */
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="app-container" class="desktop-app-container">
+        <!-- Views will be dynamically loaded here by JS -->
+    </div>
+
+    <!-- JavaScript Logic -->
+    <script>
+        // ========================================================
+        // 1. GLOBAL STATE & UTILITIES
+        // ========================================================
+
+        const LS_KEYS = {
+            SETTINGS: 'acc_settings',
+            INVOICES: 'acc_invoices',
+            // NEW KEY for deleted items
+            DELETED_INVOICES: 'acc_deleted_invoices' 
+        };
+
+        const CURRENCIES = {
+            'SAR': 'ر.س', // Saudi Riyal
+            'SDG': 'ج.س', // Sudanese Pound
+            'USD': '$',   // US Dollar
+            'EGP': 'ج.م', // Egyptian Pound
+            'AED': 'د.إ'  // UAE Dirham
+        };
+
+        // Default settings if Local Storage is empty
+        const defaultSettings = {
+            loginPassword: '1234',
+            deletePassword: '1234',
+            companyName: 'مؤسسة الفاتورة السريعة',
+            phone: '0xxxxxxxx',
+            location: 'الرياض، المملكة العربية السعودية',
+            currencySymbol: 'ر.س',
+            companyLogo: null, // Base64 string for logo
+        };
+
+        let settings = {};
+        let invoices = [];
+        let deletedInvoices = []; // NEW ARRAY for soft-deleted items
+        let currentView = 'login';
+        let isSaving = false; // Prevents double submission
+        let currentSearchQuery = ''; // Global state for search query
+
+        // State for Recycle Bin
+        let selectedDeletedInvoices = new Set(); 
+
+        /**
+         * Reads data from Local Storage or initializes with defaults.
+         */
+        const loadInitialData = () => {
+            try {
+                settings = JSON.parse(localStorage.getItem(LS_KEYS.SETTINGS)) || defaultSettings;
+                invoices = JSON.parse(localStorage.getItem(LS_KEYS.INVOICES)) || [];
+                // NEW: Load deleted invoices
+                deletedInvoices = JSON.parse(localStorage.getItem(LS_KEYS.DELETED_INVOICES)) || [];
+                
+                // Sort invoices by date descending to show latest first
+                invoices.sort((a, b) => new Date(b.date) - new Date(a.date));
+            } catch (e) {
+                console.error("Failed to load data from Local Storage, resetting to defaults.", e);
+                settings = defaultSettings;
+                invoices = [];
+                deletedInvoices = [];
+            }
+        };
+
+        /**
+         * Saves the current settings object to Local Storage.
+         */
+        const saveSettings = () => {
+            localStorage.setItem(LS_KEYS.SETTINGS, JSON.stringify(settings));
+        };
+
+        /**
+         * Saves the current active invoices array to Local Storage.
+         */
+        const saveInvoices = () => {
+            // Sort before saving for consistent order
+            invoices.sort((a, b) => new Date(b.date) - new Date(b.date));
+            localStorage.setItem(LS_KEYS.INVOICES, JSON.stringify(invoices));
+        };
+        
+        /**
+         * NEW: Saves the current deleted invoices array to Local Storage.
+         */
+        const saveDeletedInvoices = () => {
+            localStorage.setItem(LS_KEYS.DELETED_INVOICES, JSON.stringify(deletedInvoices));
+        };
+
+        /**
+         * Helper to safely format numbers (for display).
+         * @param {number} num - The number to format.
+         * @returns {string} The formatted number string.
+         */
+        const formatNumber = (num) => {
+            return (num || 0).toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+        };
+        
+        /**
+         * Converts a file object to a base64 data URL.
+         * @param {File} file - The file to convert.
+         * @returns {Promise<string>} Resolves with the base64 string.
+         */
+        const fileToBase64 = (file) => {
+            return new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = error => {
+                    console.error("FileReader Error:", error);
+                    reject(new Error("فشل في قراءة محتويات الملف."));
+                };
+                if (file) {
+                    reader.readAsDataURL(file);
+                } else {
+                    reject(new Error("لم يتم تقديم ملف."));
+                }
+            });
+        };
+
+        /**
+         * Replaces alert/confirm with a custom modal.
+         * @param {string} title - Modal title.
+         * @param {string} message - Modal body content.
+         * @param {string} type - 'error', 'success', 'confirm', 'prompt'. ('confirm' for password, 'prompt' for simple yes/no)
+         * @param {boolean} isText - If true, treats 'confirm' as a simple yes/no confirmation dialogue.
+         * @returns {Promise<string|boolean>} Resolves with input value for 'prompt' or boolean for other types.
+         */
+        const customModal = (title, message, type = 'info', isText = false) => {
+            return new Promise(resolve => {
+                const modalId = 'custom-modal';
+                let modal = document.getElementById(modalId);
+                if (modal) modal.remove();
+
+                const isPasswordPrompt = type === 'confirm' && !isText;
+                const isSimpleConfirm = type === 'prompt' || isText;
+                const isConfirm = isPasswordPrompt || isSimpleConfirm;
+                const isError = type === 'error';
+
+                // Determine button colors and labels
+                let okButtonLabel = isConfirm ? (isSimpleConfirm ? 'نعم، تأكيد' : 'تأكيد') : 'حسناً';
+                let okButtonColor = isError ? 'bg-red-600 hover:bg-red-700' : 'bg-teal-600 hover:bg-teal-700';
+                let cancelButtonLabel = isConfirm ? (isSimpleConfirm ? 'لا، إلغاء' : 'إلغاء') : 'إغلاق';
+                let cancelButtonColor = 'bg-gray-300 text-gray-800 hover:bg-gray-400';
+
+
+                const html = `
+                    <div id="${modalId}" class="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-50 transition-opacity duration-300">
+                        <div class="bg-white p-6 rounded-xl shadow-2xl w-full max-w-sm" dir="rtl">
+                            <h3 class="text-xl font-bold mb-4 ${isError ? 'text-red-700' : 'text-teal-700'}">${title}</h3>
+                            <p class="text-gray-700 mb-6">${message}</p>
+                            ${isPasswordPrompt ? `<input type="password" id="modal-input" placeholder="أدخل كلمة المرور هنا" class="w-full p-3 border border-gray-300 rounded-lg mb-4 focus:ring-teal-500 focus:border-teal-500" />` : ''}
+                            <div class="flex justify-end gap-3">
+                                ${isConfirm || type === 'error' ? `<button id="modal-cancel" class="py-2 px-4 ${cancelButtonColor}">${cancelButtonLabel}</button>` : ''}
+                                <button id="modal-ok" class="py-2 px-4 text-white rounded-lg ${okButtonColor}">
+                                    ${okButtonLabel}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+                modal = document.createElement('div');
+                modal.innerHTML = html;
+                document.body.appendChild(modal);
+                
+                const modalOk = document.getElementById('modal-ok');
+                const modalCancel = document.getElementById('modal-cancel');
+                const modalInput = document.getElementById('modal-input');
+
+                const closeModal = () => modal.remove();
+
+                modalOk.onclick = () => {
+                    closeModal();
+                    if (isPasswordPrompt) {
+                        resolve(modalInput.value); // Resolve with password string
+                    } else if (isSimpleConfirm) {
+                        resolve(true); // Resolve with true for simple confirmation (Yes)
+                    } else {
+                        resolve(true); // Resolve true for info/success/error
+                    }
+                };
+
+                if (modalCancel) {
+                    modalCancel.onclick = () => {
+                        closeModal();
+                        // Resolve false for cancel/no in confirmation dialogs
+                        if (isConfirm || type === 'error') { 
+                            resolve(false); 
+                        } else {
+                            resolve(true); // Should not happen for info/success, but safe default
+                        }
+                    };
+                }
+
+                if (modalInput) {
+                    modalInput.focus();
+                    modalInput.addEventListener('keypress', (e) => {
+                        if (e.key === 'Enter') modalOk.click();
+                    });
+                }
+            });
+        };
+        
+
+        // ========================================================
+        // 2. VIEW MANAGEMENT & NAVIGATION
+        // ========================================================
+
+        /**
+         * Renders the current view based on the state.
+         * @param {string} viewName - The view to render ('login', 'dashboard', 'invoices', 'settings', 'view_invoice', 'edit_invoice', 'recycle_bin').
+         * @param {object} data - Optional data for specific views (e.g., invoice ID).
+         */
+        const renderView = (viewName, data = {}) => {
+            currentView = viewName;
+            const container = document.getElementById('app-container');
+            container.innerHTML = '';
+            
+            // Clear selections when changing views away from recycle bin
+            if (viewName !== 'recycle_bin') {
+                selectedDeletedInvoices.clear();
+            }
+
+            // Check if the current view is for printing, if so, adjust container styles temporarily
+            const isPrintingView = viewName === 'view_invoice';
+            if (isPrintingView) {
+                container.classList.remove('desktop-app-container');
+                container.classList.add('w-full', 'min-h-screen', 'bg-white', 'shadow-none', 'flex-1');
+            } else {
+                container.classList.add('desktop-app-container');
+                container.classList.remove('w-full', 'min-h-screen', 'bg-white', 'shadow-none', 'flex-1');
+            }
+
+
+            switch (viewName) {
+                case 'login':
+                    container.innerHTML = renderLoginPage();
+                    setupLoginPageListeners();
+                    break;
+                case 'dashboard':
+                    container.innerHTML = renderMainApp(renderDashboardPage());
+                    setupDashboardListeners();
+                    break;
+                case 'invoices':
+                    container.innerHTML = renderMainApp(renderPreviousInvoicesPage());
+                    setupPreviousInvoicesListeners();
+                    break;
+                case 'recycle_bin': // NEW VIEW
+                    container.innerHTML = renderMainApp(renderRecycleBinPage());
+                    setupRecycleBinListeners();
+                    break;
+                case 'settings':
+                    container.innerHTML = renderMainApp(renderSettingsPage());
+                    setupSettingsListeners();
+                    break;
+                case 'view_invoice':
+                    // For the view_invoice, we render it directly without the main wrapper for cleaner printing
+                    container.innerHTML = renderInvoiceViewPage(data.invoiceId);
+                    setupInvoiceViewListeners(data.invoiceId);
+                    break;
+                case 'edit_invoice':
+                    container.innerHTML = renderMainApp(renderInvoiceFormPage(data.invoiceId));
+                    setupInvoiceFormListeners(data.invoiceId);
+                    break;
+                default:
+                    // Fallback to login if state is bad
+                    renderView('login');
+            }
+        };
+
+        // --- 3.2 Main App Wrapper (UPDATED: Added Recycle Bin Tab) ---
+        const renderMainApp = (contentHtml) => {
+            const totalInvoices = invoices.length;
+            const totalRevenue = invoices.reduce((sum, inv) => sum + inv.grandTotal, 0);
+
+            const getActiveClass = (view) => 
+                currentView === view || (currentView === 'edit_invoice' && view === 'dashboard') 
+                ? 'border-b-4 border-white text-white bg-teal-700/50' 
+                : 'text-teal-100 hover:bg-teal-700/50';
+
+            return `
+                <!-- Header (Top Bar) -->
+                <header class="no-print bg-teal-800 p-4 shadow-lg flex flex-col md:flex-row items-center justify-between" dir="rtl">
+                    <!-- Title and Navigation -->
+                    <div class="flex flex-col md:flex-row items-center w-full md:w-auto">
+                        <div class="text-white text-2xl font-extrabold mb-3 md:mb-0 md:ml-6 border-b md:border-b-0 border-teal-600 pb-2 md:pb-0">${settings.companyName}</div>
+                        
+                        <!-- Navigation Links -->
+                        <div class="flex space-x-2 space-x-reverse text-lg font-semibold w-full md:w-auto justify-center">
+                            <button onclick="renderView('dashboard')" class="py-2 px-4 rounded-t-lg transition duration-150 ${getActiveClass('dashboard')}">
+                                لوحة التحكم / فاتورة جديدة
+                            </button>
+                            <button onclick="renderView('invoices')" class="py-2 px-4 rounded-t-lg transition duration-150 ${getActiveClass('invoices')}">
+                                الفواتير السابقة
+                            </button>
+                            <button onclick="renderView('recycle_bin')" class="py-2 px-4 rounded-t-lg transition duration-150 ${getActiveClass('recycle_bin')}">
+                                سلة المهملات (${deletedInvoices.length})
+                            </button>
+                            <button onclick="renderView('settings')" class="py-2 px-4 rounded-t-lg transition duration-150 ${getActiveClass('settings')}">
+                                الإعدادات
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Quick Stats and Logout -->
+                    <div class="flex items-center space-x-4 space-x-reverse mt-4 md:mt-0">
+                        <!-- Stats -->
+                        <div class="text-white text-sm flex items-center bg-teal-700 p-2 rounded-lg shadow-inner">
+                            <span class="ml-3 font-semibold">فواتير: ${totalInvoices}</span>
+                            <span class="font-semibold border-r border-teal-600 pr-3">الإجمالي: ${formatNumber(totalRevenue)} ${settings.currencySymbol}</span>
+                        </div>
+                        
+                        <!-- Logout Button (Updated onclick to prompt for confirmation) -->
+                        <button onclick="promptLogout()" class="py-2 px-4 bg-red-600 text-white font-semibold rounded-lg hover:bg-red-700 transition duration-200 text-sm">
+                            خروج
+                        </button>
+                    </div>
+                </header>
+
+                <!-- Main Content Area (Flexible) -->
+                <main class="flex-1 p-8 overflow-y-auto">
+                    ${contentHtml}
+                </main>
+            `;
+        };
+
+        // --- 3.7 Recycle Bin Page (NEW) ---
+        const renderRecycleBinTableBodyHtml = () => {
+            if (deletedInvoices.length === 0) {
+                return `
+                    <tr><td colspan="6" class="p-10 text-center text-gray-500">
+                        سلة المهملات فارغة.
+                    </td></tr>
+                `;
+            }
+
+            return deletedInvoices.map(inv => {
+                const isSelected = selectedDeletedInvoices.has(inv.id);
+                return `
+                    <tr id="deleted-invoice-row-${inv.id}" class="bg-white border-b hover:bg-gray-50 ${isSelected ? 'bg-yellow-50' : ''}">
+                        <td class="px-6 py-4 whitespace-nowrap text-center">
+                            <input type="checkbox" data-id="${inv.id}" class="deleted-invoice-checkbox h-4 w-4 text-teal-600 border-gray-300 rounded focus:ring-teal-500" ${isSelected ? 'checked' : ''}>
+                        </td>
+                        <td class="px-6 py-4 whitespace-nowrap font-semibold">${inv.id}</td>
+                        <td class="px-6 py-4 whitespace-nowrap font-medium text-gray-900">${inv.customerName}</td>
+                        <td class="px-6 py-4 text-xl font-extrabold text-teal-700">${formatNumber(inv.grandTotal)} ${settings.currencySymbol}</td>
+                        <td class="px-6 py-4 whitespace-nowrap">${inv.date}</td>
+                        <td class="px-6 py-4 whitespace-nowrap text-left">
+                            <button onclick="handleRestoreInvoice('${inv.id}', '${inv.customerName}')" class="text-blue-600 hover:text-blue-900 mx-1 p-2">استعادة</button>
+                            <button onclick="handlePermanentDeletePrompt('${inv.id}', '${inv.customerName}')" class="text-red-600 hover:text-red-900 mx-1 p-2">حذف نهائي</button>
+                        </td>
+                    </tr>
+                `;
+            }).join('');
+        }
+
+        const renderRecycleBinPage = () => {
+            const allSelected = deletedInvoices.length > 0 && selectedDeletedInvoices.size === deletedInvoices.length;
+            const hasSelection = selectedDeletedInvoices.size > 0;
+
+            return `
+                <h1 class="text-4xl font-extrabold text-gray-800 mb-6 border-b pb-2">سلة المهملات (${deletedInvoices.length} فاتورة محذوفة)</h1>
+                
+                <!-- Bulk Actions and Controls -->
+                <div class="mb-6 flex flex-col md:flex-row gap-4">
+                    <div class="flex items-center bg-white p-4 rounded-xl shadow-md border border-gray-200">
+                        <label for="select-all-deleted" class="ml-2 font-semibold text-gray-700 cursor-pointer">تحديد الكل (${selectedDeletedInvoices.size})</label>
+                        <input type="checkbox" id="select-all-deleted" class="h-5 w-5 text-teal-600 border-gray-300 rounded focus:ring-teal-500" ${allSelected ? 'checked' : ''} ${deletedInvoices.length === 0 ? 'disabled' : ''}>
+                    </div>
+                    
+                    <button id="bulk-restore-btn" class="py-3 px-6 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 transition duration-200 disabled:opacity-50" ${!hasSelection ? 'disabled' : ''}>
+                        استعادة المحدد (${selectedDeletedInvoices.size})
+                    </button>
+
+                    <button id="bulk-delete-btn" class="py-3 px-6 bg-red-600 text-white font-bold rounded-xl hover:bg-red-700 transition duration-200 disabled:opacity-50" ${!hasSelection ? 'disabled' : ''}>
+                        حذف المحدد نهائياً (${selectedDeletedInvoices.size})
+                    </button>
+                </div>
+
+                <!-- Deleted Invoices Table -->
+                <div class="bg-white rounded-xl shadow-lg overflow-hidden">
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full divide-y divide-gray-200">
+                            <thead class="bg-gray-100">
+                                <tr>
+                                    <th class="px-6 py-3 text-center w-16">تحديد</th>
+                                    <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-32">رقم الفاتورة</th>
+                                    <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-48">اسم العميل</th>
+                                    <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-40">الإجمالي الكلي</th>
+                                    <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-32">تاريخ الحذف</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-48">الإجراءات الفردية</th>
+                                </tr>
+                            </thead>
+                            <tbody id="deleted-invoices-table-body" class="divide-y divide-gray-200">
+                                ${renderRecycleBinTableBodyHtml()}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+        };
+
+        // --- All other rendering functions (Dashboard, Invoices, Settings, View) go here ---
+        // (Note: The rest of the rendering functions from the previous response are assumed to be here, 
+        // they are excluded from this block for brevity but are required for the full app to run.)
+        
+        // --- 3.1 Login Page ---
+        const renderLoginPage = () => {
+            return `
+                <div class="flex flex-col items-center justify-center min-h-screen w-full bg-gray-100 rounded-xl">
+                    <div class="p-8 bg-white rounded-2xl shadow-2xl w-full max-w-md text-center" dir="rtl">
+                        <h2 class="text-3xl font-extrabold text-teal-600 mb-6">تسجيل الدخول - نظام الفاتورة</h2>
+                        <p class="text-gray-500 mb-4">كلمة المرور الافتراضية هي: 1234</p>
+                        <div id="login-error" class="hidden p-3 mb-4 bg-red-100 text-red-700 rounded-lg">خطأ في كلمة المرور!</div>
+                        <form id="login-form">
+                            <input type="password" id="login-password" placeholder="كلمة المرور الرئيسية"
+                                class="w-full p-4 border-2 border-gray-300 rounded-xl focus:ring-teal-500 focus:border-teal-500 transition duration-150 text-center"
+                                required />
+                            <button type="submit" class="w-full mt-6 py-3 bg-teal-600 text-white font-bold rounded-xl hover:bg-teal-700 transition duration-200 shadow-lg">
+                                دخول النظام
+                            </button>
+                        </form>
+                    </div>
+                </div>
+            `;
+        };
+        
+        // --- 3.3 Dashboard / New Invoice Form ---
+
+        /**
+         * Generates HTML for the dashboard statistics.
+         * Uses a fixed circle path length (2 * pi * radius = 2 * 3.14159 * 45 = 282.7)
+         */
+        const renderDashboardStats = () => {
+            const totalInvoices = invoices.length;
+            const totalRevenue = invoices.reduce((sum, inv) => sum + inv.grandTotal, 0);
+            
+            // For a simple visual, let's show the revenue percentage towards a fixed goal (e.g., 50,000)
+            const REVENUE_GOAL = 50000; 
+            const percentage = Math.min(100, (totalRevenue / REVENUE_GOAL) * 100);
+            const circumference = 282.7; // 2 * PI * 45 (radius)
+            const offset = circumference - (percentage / 100) * circumference;
+
+            return `
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                    <!-- Total Invoices Card -->
+                    <div class="bg-white p-6 rounded-xl shadow-lg border-b-4 border-teal-500 flex items-center justify-between">
+                        <div>
+                            <p class="text-xl font-medium text-gray-500">إجمالي الفواتير</p>
+                            <p class="text-4xl font-extrabold text-gray-800 mt-2">${totalInvoices}</p>
+                        </div>
+                        <div class="text-teal-500">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M16 13H8"/><path d="M16 17H8"/><path d="M10 9H8"/></svg>
+                        </div>
+                    </div>
+
+                    <!-- Total Revenue Card -->
+                    <div class="bg-white p-6 rounded-xl shadow-lg border-b-4 border-blue-500 flex items-center justify-between">
+                        <div>
+                            <p class="text-xl font-medium text-gray-500">الإجمالي الكلي للإيرادات</p>
+                            <p class="text-3xl font-extrabold text-gray-800 mt-2">${formatNumber(totalRevenue)} <span class="text-2xl">${settings.currencySymbol}</span></p>
+                        </div>
+                        <div class="text-blue-500">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+                        </div>
+                    </div>
+
+                    <!-- Geometric (Circular) Goal Chart -->
+                    <div class="bg-white p-6 rounded-xl shadow-lg border-b-4 border-purple-500 flex items-center">
+                        <div class="relative w-24 h-24 ml-4">
+                            <svg class="w-full h-full progress-circle" viewBox="0 0 100 100">
+                                <!-- Background circle -->
+                                <circle class="progress-circle-bg" cx="50" cy="50" r="45" fill="none"></circle>
+                                <!-- Progress circle -->
+                                <circle class="progress-circle-fill" 
+                                    cx="50" cy="50" r="45" fill="none" 
+                                    stroke-dasharray="${circumference}" 
+                                    stroke-dashoffset="${offset}"></circle>
+                            </svg>
+                            <div class="absolute inset-0 flex items-center justify-center">
+                                <span class="text-xl font-bold text-purple-700">${Math.round(percentage)}%</span>
+                            </div>
+                        </div>
+                        <div>
+                            <p class="text-xl font-medium text-gray-500">هدف الإيرادات (50k)</p>
+                            <p class="text-sm font-semibold text-purple-700 mt-2">تم تحقيق ${formatNumber(totalRevenue)} من ${formatNumber(REVENUE_GOAL)}</p>
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+
+        const renderDashboardPage = (invoiceId = null) => {
+            const statsHtml = renderDashboardStats();
+            const invoiceFormHtml = renderInvoiceFormPage(invoiceId);
+
+            return `
+                <h1 class="text-4xl font-extrabold text-gray-800 mb-6 border-b pb-2">لوحة التحكم والإحصائيات</h1>
+                ${statsHtml}
+                <div class="mt-8">
+                    ${invoiceFormHtml}
+                </div>
+            `;
+        }
+
+
+        const renderInvoiceFormPage = (invoiceId = null) => {
+            const invoice = invoiceId ? invoices.find(inv => inv.id === invoiceId) : null;
+            const isEditing = !!invoice;
+            
+            const itemsHtml = (invoice?.items || [{ desc: '', qty: 1, price: 0 }]).map((item, index) => `
+                <tr class="item-row" data-index="${index}">
+                    <td><input type="text" name="desc" value="${item.desc || ''}" placeholder="وصف الخدمة/المنتج" class="w-full p-2 border rounded-lg focus:ring-blue-500" required></td>
+                    <td><input type="number" name="qty" value="${item.qty || 1}" min="1" class="item-qty w-20 p-2 border rounded-lg focus:ring-blue-500 text-center" required></td>
+                    <td><input type="number" name="price" value="${item.price || 0}" min="0" step="0.01" class="item-price w-32 p-2 border rounded-lg focus:ring-blue-500 text-center" required></td>
+                    <td class="item-total text-center font-bold text-gray-700 w-32">${formatNumber(item.qty * item.price)}</td>
+                    <td class="no-print"><button type="button" class="remove-item p-2 text-red-500 hover:text-red-700 rounded-full"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg></button></td>
+                </tr>
+            `).join('');
+
+            return `
+                <h1 class="text-3xl font-extrabold text-gray-800 mb-6 border-b pb-2">${isEditing ? 'تعديل الفاتورة رقم: ' + invoice.id : 'إنشاء فاتورة جديدة'}</h1>
+
+                <form id="invoice-form" data-invoice-id="${invoiceId || ''}">
+                    <div class="bg-white p-6 rounded-xl shadow-lg mb-8">
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                            <!-- Customer Name -->
+                            <div>
+                                <label for="customer-name" class="block text-sm font-medium text-gray-700 mb-1">اسم العميل:</label>
+                                <input type="text" id="customer-name" value="${invoice?.customerName || ''}" required
+                                    class="w-full p-3 border rounded-lg focus:ring-teal-500 focus:border-teal-500">
+                            </div>
+                            <!-- Customer Phone -->
+                            <div>
+                                <label for="customer-phone" class="block text-sm font-medium text-gray-700 mb-1">رقم جوال العميل (اختياري):</label>
+                                <input type="text" id="customer-phone" value="${invoice?.customerPhone || ''}"
+                                    class="w-full p-3 border rounded-lg focus:ring-teal-500 focus:border-teal-500" placeholder="مثال: 0XXXXXXXXX">
+                            </div>
+                            <!-- Invoice Date -->
+                            <div>
+                                <label for="invoice-date" class="block text-sm font-medium text-gray-700 mb-1">تاريخ الفاتورة:</label>
+                                <input type="date" id="invoice-date" value="${invoice?.date || new Date().toISOString().substring(0, 10)}" required
+                                    class="w-full p-3 border rounded-lg focus:ring-teal-500 focus:border-teal-500">
+                            </div>
+                        </div>
+
+                        <!-- Tax Rate (Moved to own row for better spacing) -->
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                            <div>
+                                <label for="tax-rate" class="block text-sm font-medium text-gray-700 mb-1">نسبة الضريبة (VAT %):</label>
+                                <input type="number" id="tax-rate" value="${invoice?.taxRate || 15}" min="0" max="100" step="0.01"
+                                    class="w-full p-3 border rounded-lg focus:ring-teal-500 focus:border-teal-500 text-center">
+                            </div>
+                        </div>
+
+                        <h3 class="text-2xl font-bold text-gray-800 mb-4 border-b pb-2">تفاصيل الأصناف</h3>
+                        
+                        <div class="overflow-x-auto mb-6">
+                            <table class="min-w-full divide-y divide-gray-200">
+                                <thead>
+                                    <tr class="bg-gray-50 text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                        <th class="px-6 py-3 text-right">الوصف</th>
+                                        <th class="px-6 py-3 text-center w-20">الكمية</th>
+                                        <th class="px-6 py-3 text-center w-32">سعر الوحدة (${settings.currencySymbol})</th>
+                                        <th class="px-6 py-3 text-center w-32">الإجمالي الجزئي (${settings.currencySymbol})</th>
+                                        <th class="px-6 py-3 w-10 no-print">حذف</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="invoice-items-body" class="bg-white divide-y divide-gray-200">
+                                    ${itemsHtml}
+                                </tbody>
+                            </table>
+                        </div>
+                        
+                        <button type="button" id="add-item-btn" class="flex items-center justify-center w-full py-2 text-sm bg-blue-100 text-blue-700 font-semibold rounded-lg hover:bg-blue-200 transition duration-150">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="ml-2"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+                            إضافة صنف
+                        </button>
+
+                        <!-- Totals Section -->
+                        <div class="flex justify-end mt-8">
+                            <div class="w-full md:w-1/2 p-4 bg-gray-50 rounded-xl border border-gray-200">
+                                <div class="flex justify-between py-2 border-b">
+                                    <span class="text-lg font-medium text-gray-600">الإجمالي الفرعي:</span>
+                                    <span id="sub-total" class="text-lg font-bold text-gray-800">${formatNumber(invoice?.subTotal)} ${settings.currencySymbol}</span>
+                                </div>
+                                <div class="flex justify-between py-2 border-b">
+                                    <span class="text-lg font-medium text-gray-600">قيمة الضريبة (<span id="tax-rate-display">${invoice?.taxRate || 15}%</span>):</span>
+                                    <span id="tax-amount" class="text-lg font-bold text-gray-800">${formatNumber(invoice?.tax)} ${settings.currencySymbol}</span>
+                                </div>
+                                <div class="flex justify-between py-2 pt-4">
+                                    <span class="text-xl font-bold text-teal-700">الإجمالي الكلي:</span>
+                                    <span id="grand-total" class="text-2xl font-extrabold text-teal-700">${formatNumber(invoice?.grandTotal)} ${settings.currencySymbol}</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Action Buttons -->
+                        <div class="flex justify-end mt-8 gap-4 no-print">
+                            ${isEditing ? `
+                                <button type="button" onclick="renderView('invoices')" class="py-3 px-8 bg-gray-500 text-white font-semibold rounded-xl hover:bg-gray-600 transition duration-200">
+                                    إلغاء التعديل
+                                </button>
+                                <button type="button" id="btn-update-print" class="py-3 px-8 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 transition duration-200">
+                                    تحديث وطباعة فورية
+                                </button>
+                                <button type="button" id="btn-update" class="py-3 px-8 bg-teal-600 text-white font-bold rounded-xl hover:bg-teal-700 transition duration-200">
+                                    تحديث الفاتورة
+                                </button>
+                            ` : `
+                                <button type="button" id="btn-save-print" class="py-3 px-8 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 transition duration-200">
+                                    حفظ وطباعة فورية
+                                </button>
+                                <button type="button" id="btn-save" class="py-3 px-8 bg-teal-600 text-white font-bold rounded-xl hover:bg-teal-700 transition duration-200">
+                                    حفظ الفاتورة
+                                </button>
+                            `}
+                        </div>
+                    </div>
+                </form>
+            `;
+        };
+        
+        // --- 3.4 Previous Invoices Page (Active) ---
+
+        /**
+         * Filters the global invoices list based on the currentSearchQuery.
+         * @param {string} query - The search string.
+         * @returns {Array} Filtered list of invoices.
+         */
+        const filterInvoices = (query) => {
+            if (!query) return invoices;
+            const lowerQuery = query.toLowerCase();
+            return invoices.filter(inv => 
+                inv.id.toLowerCase().includes(lowerQuery) ||
+                inv.customerName.toLowerCase().includes(lowerQuery) ||
+                (inv.customerPhone && inv.customerPhone.includes(lowerQuery))
+            );
+        };
+
+        /**
+         * Generates the table body HTML for a given list of invoices.
+         * @param {Array} filteredList - The invoices to display.
+         * @returns {string} The HTML string for the table body.
+         */
+        const renderInvoiceTableBodyHtml = (filteredList) => {
+            if (filteredList.length === 0) {
+                return `
+                    <tr><td colspan="6" class="p-10 text-center text-gray-500">
+                        ${currentSearchQuery ? `لا توجد فواتير مطابقة لـ: <span class="font-bold text-red-500">${currentSearchQuery}</span>` : 'لا توجد فواتير سابقة محفوظة حالياً.'}
+                    </td></tr>
+                `;
+            }
+
+            return filteredList.map(inv => `
+                <tr id="invoice-row-${inv.id}" class="bg-white border-b hover:bg-gray-50">
+                    <td class="px-6 py-4 whitespace-nowrap font-semibold">${inv.id}</td>
+                    <td class="px-6 py-4 whitespace-nowrap">${inv.date}</td>
+                    <td class="px-6 py-4 whitespace-nowrap font-medium text-gray-900">${inv.customerName}</td>
+                    <td class="px-6 py-4">
+                        <span class="line-clamp-2">${inv.items.map(i => i.desc).join(', ')}</span>
+                    </td>
+                    <td class="px-6 py-4 whitespace-nowrap text-xl font-extrabold text-teal-700">${formatNumber(inv.grandTotal)} ${settings.currencySymbol}</td>
+                    <td class="px-6 py-4 whitespace-nowrap text-left">
+                        <button onclick="renderView('view_invoice', { invoiceId: '${inv.id}' })" class="text-blue-600 hover:text-blue-900 mx-1 p-2">عرض</button>
+                        <button onclick="renderView('edit_invoice', { invoiceId: '${inv.id}' })" class="text-yellow-600 hover:text-yellow-900 mx-1 p-2">تعديل</button>
+                        <button onclick="handleSoftDeletePrompt('${inv.id}', '${inv.customerName}')" class="text-red-600 hover:text-red-900 mx-1 p-2">حذف (للسلة)</button>
+                        <button onclick="printInvoice('${inv.id}')" class="text-gray-600 hover:text-gray-900 mx-1 p-2">طباعة</button>
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        const renderPreviousInvoicesPage = () => {
+            const initialFilteredInvoices = filterInvoices(currentSearchQuery);
+
+            return `
+                <h1 class="text-4xl font-extrabold text-gray-800 mb-6 border-b pb-2">الفواتير السابقة (${invoices.length})</h1>
+                
+                <!-- Search Bar -->
+                <div class="mb-6 bg-white p-4 rounded-xl shadow-md flex items-center border border-gray-200">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-gray-400 ml-3"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                    <input type="text" id="invoice-search" value="${currentSearchQuery}" placeholder="ابحث برقم الفاتورة، اسم العميل، أو رقم الجوال..."
+                        class="flex-1 p-2 border-none focus:ring-0 focus:outline-none text-lg">
+                </div>
+
+                <div class="bg-white rounded-xl shadow-lg overflow-hidden">
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full divide-y divide-gray-200">
+                            <thead class="bg-gray-100">
+                                <tr>
+                                    <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-32">رقم الفاتورة</th>
+                                    <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-32">التاريخ</th>
+                                    <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-48">اسم العميل</th>
+                                    <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">الأصناف (مختصر)</th>
+                                    <th class="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider w-40">الإجمالي الكلي</th>
+                                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-48">الإجراءات</th>
+                                </tr>
+                            </thead>
+                            <tbody id="invoices-table-body" class="divide-y divide-gray-200">
+                                ${renderInvoiceTableBodyHtml(initialFilteredInvoices)}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            `;
+        };
+        
+        // --- 3.5 Invoice View Page ---
+        const renderInvoiceViewPage = (invoiceId) => {
+            const invoice = invoices.find(inv => inv.id === invoiceId);
+            if (!invoice) return `<p class="p-10 text-red-600">خطأ: لم يتم العثور على الفاتورة المطلوبة.</p>`;
+            
+            const itemsHtml = invoice.items.map((item, index) => `
+                <tr class="border-b">
+                    <td class="py-2 text-right pr-4">${item.desc}</td>
+                    <td class="py-2 text-center">${item.qty}</td>
+                    <td class="py-2 text-center">${formatNumber(item.price)} ${settings.currencySymbol}</td>
+                    <td class="py-2 text-center font-bold">${formatNumber(item.qty * item.price)} ${settings.currencySymbol}</td>
+                </tr>
+            `).join('');
+
+            return `
+                <div id="invoice-print-area" class="bg-white p-8 md:p-12 rounded-xl shadow-2xl min-h-[800px] flex flex-col justify-between">
+                    <!-- Invoice Header -->
+                    <div class="header-section">
+                        <div class="flex justify-between items-start mb-8 border-b-2 border-teal-600 pb-4">
+                            <div class="w-2/3">
+                                <div class="flex items-center mb-2">
+                                    <!-- Company Logo (if available) -->
+                                    ${settings.companyLogo ? `<img src="${settings.companyLogo}" alt="شعار المؤسسة" class="h-16 md:h-20 w-auto ml-4 object-contain rounded-lg border p-1" />` : ''}
+                                    <div>
+                                        <h1 class="text-3xl md:text-4xl font-extrabold text-teal-700">${settings.companyName}</h1>
+                                    </div>
+                                </div>
+                                <p class="text-sm text-gray-600 mt-2">الموقع: ${settings.location}</p>
+                                <p class="text-sm text-gray-600">الهاتف: ${settings.phone}</p>
+                            </div>
+                            <div class="text-left w-1/3 pt-2">
+                                <h2 class="text-2xl font-bold text-gray-800 mb-2">فاتورة ضريبية</h2>
+                                <p class="text-sm">رقم الفاتورة: <span class="font-bold text-teal-700">${invoice.id}</span></p>
+                                <p class="text-sm">التاريخ: ${invoice.date}</p>
+                                <!-- NEW: Invoice Time -->
+                                ${invoice.invoiceTime ? `<p class="text-sm">الوقت: ${invoice.invoiceTime}</p>` : ''}
+                            </div>
+                        </div>
+
+                        <!-- Customer Info -->
+                        <div class="mb-8 p-4 bg-gray-50 rounded-lg border border-gray-200 grid grid-cols-2 gap-4">
+                            <p class="text-lg font-semibold text-gray-700">العميل: <span class="font-bold">${invoice.customerName}</span></p>
+                            ${invoice.customerPhone ? `<p class="text-lg font-semibold text-gray-700">الجوال: <span class="font-bold">${invoice.customerPhone}</span></p>` : ''}
+                        </div>
+                    </div>
+
+                    <!-- Items Table -->
+                    <div class="flex-1">
+                        <table class="min-w-full mb-8 border-collapse">
+                            <thead>
+                                <tr class="bg-teal-600 text-white font-bold text-base md:text-lg">
+                                    <th class="py-3 text-right pr-4">الوصف</th>
+                                    <th class="py-3 text-center w-20">الكمية</th>
+                                    <th class="py-3 text-center w-32">سعر الوحدة</th>
+                                    <th class="py-3 text-center w-32">الإجمالي الجزئي</th>
+                                </tr>
+                            </thead>
+                            <tbody class="text-sm md:text-base">
+                                ${itemsHtml}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <!-- Totals Summary & Footer -->
+                    <div class="footer-section mt-10 pt-4 border-t-2 border-gray-200">
+                        <div class="flex flex-col md:flex-row justify-end items-end">
+                            <!-- Totals Summary -->
+                            <div class="w-full md:w-1/2 p-4">
+                                <div class="flex justify-between py-1">
+                                    <span class="font-medium text-gray-600">الإجمالي الفرعي:</span>
+                                    <span class="font-bold">${formatNumber(invoice.subTotal)} ${settings.currencySymbol}</span>
+                                </div>
+                                <div class="flex justify-between py-1">
+                                    <span class="font-medium text-gray-600">الضريبة (${invoice.taxRate}%):</span>
+                                    <span class="font-bold">${formatNumber(invoice.tax)} ${settings.currencySymbol}</span>
+                                </div>
+                                <div class="flex justify-between py-2 border-t mt-2">
+                                    <span class="text-xl font-extrabold text-teal-700">الإجمالي الكلي المستحق:</span>
+                                    <span class="text-2xl font-extrabold text-teal-700">${formatNumber(invoice.grandTotal)} ${settings.currencySymbol}</span>
+                                </div>
+                            </div>
+                        </div>
+                        <p class="text-center text-xs text-gray-500 mt-6 md:mt-4">شكراً لتعاملكم معنا. نتمنى لكم يوماً سعيداً. ${settings.companyName}</p>
+                    </div>
+                </div>
+
+                <!-- Control Buttons -->
+                <div class="no-print flex justify-center mt-8 gap-4 w-full">
+                    <button onclick="renderView('invoices')" class="py-3 px-8 bg-gray-500 text-white font-semibold rounded-xl hover:bg-gray-600 transition duration-200">
+                        العودة للفواتير
+                    </button>
+                    <button onclick="printInvoice('${invoiceId}')" class="py-3 px-8 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 transition duration-200">
+                        طباعة الفاتورة
+                    </button>
+                    <button onclick="renderView('edit_invoice', { invoiceId: '${invoiceId}' })" class="py-3 px-8 bg-yellow-600 text-white font-semibold rounded-xl hover:bg-yellow-700 transition duration-200">
+                        تعديل الفاتورة
+                    </button>
+                </div>
+            `;
+        };
+        
+       // --- 3.6 Settings Page ---
+const renderSettingsPage = () => {
+    const currencyOptions = Object.entries(CURRENCIES).map(([code, symbol]) => 
+        `<option value="${symbol}" ${settings.currencySymbol === symbol ? 'selected' : ''}>${code} (${symbol})</option>`
+    ).join('');
+
+    return `
+        <h1 class="text-4xl font-extrabold text-gray-800 mb-6 border-b pb-2">إعدادات النظام</h1>
+        
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+            <!-- Company Settings -->
+            <div class="bg-white p-6 rounded-xl shadow-lg border-t-4 border-teal-500 flex flex-col">
+                <h2 class="text-2xl font-bold text-gray-800 mb-4">إعدادات المؤسسة/المطعم</h2>
+                <form id="company-settings-form" class="flex-1 flex flex-col">
+                    <div class="mb-4">
+                        <label for="company-name" class="block text-sm font-medium text-gray-700 mb-1">اسم المؤسسة:</label>
+                        <input type="text" id="company-name" value="${settings.companyName}" required
+                            class="w-full p-3 border rounded-lg focus:ring-teal-500 focus:border-teal-500">
+                    </div>
+                    <div class="mb-4">
+                        <label for="company-phone" class="block text-sm font-medium text-gray-700 mb-1">رقم الهاتف:</label>
+                        <input type="text" id="company-phone" value="${settings.phone}" required
+                            class="w-full p-3 border rounded-lg focus:ring-teal-500 focus:border-teal-500">
+                    </div>
+                    <div class="mb-6">
+                        <label for="company-location" class="block text-sm font-medium text-gray-700 mb-1">الموقع/العنوان:</label>
+                        <input type="text" id="company-location" value="${settings.location}" required
+                            class="w-full p-3 border rounded-lg focus:ring-teal-500 focus:border-teal-500">
+                    </div>
+                    <div class="mb-6">
+                        <label for="currency-symbol" class="block text-sm font-medium text-gray-700 mb-1">العملة:</label>
+                        <select id="currency-symbol" 
+                            class="w-full p-3 border rounded-lg focus:ring-teal-500 focus:border-teal-500">
+                            ${currencyOptions}
+                        </select>
+                    </div>
+
+                    <!-- Logo Upload Section -->
+                    <div class="mb-6 border p-4 rounded-lg bg-gray-50">
+                        <label for="logo-upload" class="block text-sm font-bold text-gray-700 mb-2">
+                            ارفاق شعار المؤسسة (لوقو) - الحد الأقصى 1 ميغا:
+                        </label>
+                        <input type="file" id="logo-upload" accept="image/*" 
+                            class="w-full text-sm text-gray-600 
+                                   file:mr-4 file:py-2 file:px-4 
+                                   file:rounded-full file:border-0 
+                                   file:text-sm file:font-semibold 
+                                   file:bg-teal-50 file:text-teal-700 
+                                   hover:file:bg-teal-100">
+
+                        ${settings.companyLogo ? `
+                            <div class="flex items-center justify-between mt-3">
+                                <p class="text-xs text-green-600">تم رفع الشعار بنجاح (سيبقى ما لم ترفع ملفاً جديداً).</p>
+                                <button type="button" id="delete-logo-btn" 
+                                    class="text-red-500 hover:text-red-700 text-sm font-semibold p-1 rounded-md bg-white border border-red-200 shadow-sm transition">
+                                    حذف الشعار
+                                </button>
+                            </div>
+                            <img src="${settings.companyLogo}" alt="الشعار الحالي" 
+                                class="h-10 w-auto mt-3 object-contain rounded-md" />
+                        ` : '<p class="text-xs mt-2 text-red-500">لم يتم رفع شعار بعد.</p>'}
+                    </div>
+
+                    <!-- Save Button -->
+                    <button type="submit" 
+                        class="w-full py-3 bg-teal-600 text-white font-bold rounded-xl hover:bg-teal-700 transition duration-200">
+                        حفظ إعدادات المؤسسة
+                    </button>
+
+                    <!-- About the App with Warning and Signature -->
+                    <div class="mt-6 text-center border-t border-gray-200 pt-6 px-4">
+                        <h3 class="text-base font-semibold text-gray-700 mb-3">نظام إدارة الفواتير المتقدم</h3>
+                        <p class="text-sm text-gray-500 font-sans mb-3">
+                            نظام متكامل صُمم لتبسيط وأتمتة عملية إصدار وإدارة الفواتير داخل مؤسستكم. 
+                            يتميز النظام بقدرته على: إصدار فواتير دقيقة، توفير إحصائيات فورية، توفير آليات طباعة متقدمة، وضمان أقصى درجات الأمان من خلال الحفظ المحلي للبيانات.
+                        </p>
+                        <p class="text-sm text-gray-500 font-sans mb-3">
+                            كما يشتمل على أدوات قوية لإدارة دورة حياة الفواتير، بما في ذلك سلة مهملات متطورة تتيح استعادة أو حذف الفواتير نهائيًا بكل يسر وفاعلية.
+                        </p>
+                        <p class="text-sm text-red-600 font-sans font-semibold mb-3">
+                            ⚠️ تنبيه: جميع الفواتير والبيانات محفوظة محليًا (Local Storage). إذا قمت بتغيير الجهاز أو حذف التطبيق، فلن تتمكن من استرجاع أي بيانات أو فواتير أبدًا.
+                        </p>
+                        <p class="text-sm text-gray-500 font-sans mb-3">
+                            تطوير وتصميم: 
+                            <span class="font-semibold text-teal-600 hover:text-teal-700 transition-all duration-300">
+                                مهاب تكنولوجي - Muhab Technology
+                            </span>
+                        </p>
+                        <p class="text-sm text-gray-400 mt-2">جميع الحقوق محفوظة © 2025</p>
+                    </div>
+                </form>
+            </div>
+
+                    <!-- Security Settings & Delete All Invoices -->
+                    <div class="bg-white p-6 rounded-xl shadow-lg border-t-4 border-red-500">
+                        <h2 class="text-2xl font-bold text-gray-800 mb-4">إعدادات الأمان</h2>
+                        
+                        <!-- Login Password Change -->
+                        <form id="login-password-form" class="mb-8 border-b pb-6 border-gray-100">
+                            <h3 class="text-xl font-semibold mb-3">تغيير كلمة مرور الدخول</h3>
+                            <div class="mb-4">
+                                <label for="current-login-pass" class="block text-sm font-medium text-gray-700 mb-1">كلمة المرور الحالية:</label>
+                                <input type="password" id="current-login-pass" placeholder="كلمة المرور الحالية" required
+                                    class="w-full p-3 border rounded-lg focus:ring-red-500 focus:border-red-500">
+                            </div>
+                            <div class="mb-4">
+                                <label for="new-login-pass" class="block text-sm font-medium text-gray-700 mb-1">كلمة المرور الجديدة:</label>
+                                <input type="password" id="new-login-pass" placeholder="كلمة المرور الجديدة" required
+                                    class="w-full p-3 border rounded-lg focus:ring-red-500 focus:border-red-500">
+                            </div>
+                            <div class="mb-4">
+                                <label for="confirm-new-login-pass" class="block text-sm font-medium text-gray-700 mb-1">تأكيد كلمة المرور الجديدة:</label>
+                                <input type="password" id="confirm-new-login-pass" placeholder="أعد إدخال الجديدة" required
+                                    class="w-full p-3 border rounded-lg focus:ring-red-500 focus:border-red-500">
+                            </div>
+                            <button type="submit" class="w-full py-3 bg-red-600 text-white font-bold rounded-xl hover:bg-red-700 transition duration-200">
+                                تحديث كلمة مرور الدخول
+                            </button>
+                        </form>
+
+                        <!-- Delete Password Change -->
+                        <form id="delete-password-form" class="mb-8 border-b pb-6 border-gray-100">
+                            <h3 class="text-xl font-semibold mb-3">تغيير كلمة مرور الحذف</h3>
+                            <div class="mb-4">
+                                <label for="current-delete-pass" class="block text-sm font-medium text-gray-700 mb-1">كلمة المرور الحالية:</label>
+                                <input type="password" id="current-delete-pass" placeholder="كلمة المرور الحالية" required
+                                    class="w-full p-3 border rounded-lg focus:ring-red-500 focus:border-red-500">
+                            </div>
+                            <div class="mb-4">
+                                <label for="new-delete-pass" class="block text-sm font-medium text-gray-700 mb-1">كلمة المرور الجديدة للحذف:</label>
+                                <input type="password" id="new-delete-pass" placeholder="كلمة مرور الحذف الجديدة" required
+                                    class="w-full p-3 border rounded-lg focus:ring-red-500 focus:border-red-500">
+                            </div>
+                            <div class="mb-4">
+                                <label for="confirm-new-delete-pass" class="block text-sm font-medium text-gray-700 mb-1">تأكيد كلمة المرور الجديدة:</label>
+                                <input type="password" id="confirm-new-delete-pass" placeholder="أعد إدخال الجديدة" required
+                                    class="w-full p-3 border rounded-lg focus:ring-red-500 focus:border-red-500">
+                            </div>
+                            <button type="submit" class="w-full py-3 bg-red-600 text-white font-bold rounded-xl hover:bg-red-700 transition duration-200">
+                                تحديث كلمة مرور الحذف
+                            </button>
+                            <p class="text-xs text-red-500 mt-2">ملاحظة: هذه الكلمة تستخدم للحذف الدائم من سلة المهملات.</p>
+                        </form>
+
+                        <!-- Delete All Invoices -->
+                        <div class="mt-8 pt-4">
+                            <h3 class="text-2xl font-bold text-red-700 mb-3">مسح جميع البيانات (نهائي)</h3>
+                            <div class="p-4 bg-red-100 border-r-4 border-red-500 rounded-lg mb-4">
+                                <p class="font-bold text-red-700">تحذير خطير!</p>
+                                <p class="text-red-600 text-sm">هذا الإجراء لا رجعة فيه. عند الضغط، سيتم مسح جميع الفواتير النشطة والمحذوفة (${invoices.length + deletedInvoices.length}) بشكل دائم.</p>
+                            </div>
+                            <button id="delete-all-invoices-btn" class="w-full py-3 bg-gray-700 text-white font-bold rounded-xl hover:bg-black transition duration-200 disabled:opacity-50" ${invoices.length + deletedInvoices.length === 0 ? 'disabled' : ''}>
+                                حذف جميع البيانات نهائياً (${invoices.length + deletedInvoices.length})
+                            </button>
+                        </div>
+
+                    </div>
+                </div>
+            `;
+        };
+        // --- End of other rendering functions ---
+
+
+        // ========================================================
+        // 4. LISTENER SETUP & LOGIC
+        // ========================================================
+        
+        // --- 4.1 Login Listeners ---
+        const setupLoginPageListeners = () => {
+            document.getElementById('login-form').addEventListener('submit', (e) => {
+                e.preventDefault();
+                const password = document.getElementById('login-password').value;
+                const errorEl = document.getElementById('login-error');
+
+                if (password === settings.loginPassword) {
+                    renderView('dashboard');
+                } else {
+                    errorEl.textContent = 'خطأ: كلمة المرور غير صحيحة.';
+                    errorEl.classList.remove('hidden');
+                }
+            });
+        };
+
+        // --- 4.2 Dashboard/Invoice Form Listeners ---
+        const setupDashboardListeners = () => {
+            // Clear search query when entering the dashboard
+            currentSearchQuery = ''; 
+            setupInvoiceFormListeners(null); // Initialize form for new invoice
+        };
+
+        const setupInvoiceFormListeners = (invoiceId) => {
+            const form = document.getElementById('invoice-form');
+            if (!form) return;
+
+            const itemsBody = document.getElementById('invoice-items-body');
+            const taxRateInput = document.getElementById('tax-rate');
+            const addItemBtn = document.getElementById('add-item-btn');
+            
+            // Function to calculate and update totals
+            const updateTotals = () => {
+                let subTotal = 0;
+                const taxRate = parseFloat(taxRateInput.value) / 100 || 0;
+                
+                document.querySelectorAll('.item-row').forEach(row => {
+                    const qty = parseFloat(row.querySelector('.item-qty').value) || 0;
+                    const price = parseFloat(row.querySelector('.item-price').value) || 0;
+                    const total = qty * price;
+                    subTotal += total;
+                    row.querySelector('.item-total').textContent = formatNumber(total);
+                });
+
+                const taxAmount = subTotal * taxRate;
+                const grandTotal = subTotal + taxAmount;
+
+                document.getElementById('sub-total').textContent = `${formatNumber(subTotal)} ${settings.currencySymbol}`;
+                document.getElementById('tax-rate-display').textContent = `${taxRateInput.value}%`;
+                document.getElementById('tax-amount').textContent = `${formatNumber(taxAmount)} ${settings.currencySymbol}`;
+                document.getElementById('grand-total').textContent = `${formatNumber(grandTotal)} ${settings.currencySymbol}`;
+            };
+            
+            // Function to add a new item row
+            const addItemRow = (desc = '', qty = 1, price = 0) => {
+                const newRow = document.createElement('tr');
+                newRow.className = 'item-row bg-white border-b';
+                newRow.innerHTML = `
+                    <td><input type="text" name="desc" value="${desc}" placeholder="وصف الخدمة/المنتج" class="w-full p-2 border rounded-lg focus:ring-blue-500" required></td>
+                    <td><input type="number" name="qty" value="${qty}" min="1" class="item-qty w-20 p-2 border rounded-lg focus:ring-blue-500 text-center" required></td>
+                    <td><input type="number" name="price" value="${price}" min="0" step="0.01" class="item-price w-32 p-2 border rounded-lg focus:ring-blue-500 text-center" required></td>
+                    <td class="item-total text-center font-bold text-gray-700 w-32">${formatNumber(qty * price)}</td>
+                    <td class="no-print"><button type="button" class="remove-item p-2 text-red-500 hover:text-red-700 rounded-full"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg></button></td>
+                `;
+                itemsBody.appendChild(newRow);
+                
+                // Add listeners to the new row
+                newRow.querySelectorAll('input').forEach(input => input.addEventListener('input', updateTotals));
+                newRow.querySelector('.remove-item').addEventListener('click', () => {
+                    newRow.remove();
+                    updateTotals();
+                });
+                updateTotals(); // Recalculate totals immediately
+            };
+
+            // Initial calculation (important for edit mode)
+            updateTotals();
+
+            // Bind global listeners
+            addItemBtn.addEventListener('click', () => addItemRow());
+            taxRateInput.addEventListener('input', updateTotals);
+            itemsBody.addEventListener('input', (e) => {
+                if (e.target.closest('.item-row')) {
+                    updateTotals();
+                }
+            });
+            itemsBody.addEventListener('click', (e) => {
+                if (e.target.closest('.remove-item')) {
+                    e.target.closest('.item-row').remove();
+                    updateTotals();
+                }
+            });
+
+            /**
+             * Handles the saving/updating logic for an invoice.
+             * @param {string} actionType - 'save', 'save-print', 'update', or 'update-print'
+             */
+            const processInvoiceSubmission = (actionType) => {
+                if (isSaving) return;
+                
+                // Basic form validation check (required inputs only)
+                if (!form.reportValidity()) {
+                    customModal('خطأ في الإدخال', 'الرجاء ملء جميع الحقول المطلوبة بشكل صحيح.', 'error');
+                    return;
+                }
+
+                const invoiceItems = [];
+                document.querySelectorAll('.item-row').forEach(row => {
+                    const desc = row.querySelector('input[name="desc"]').value.trim();
+                    const qty = parseFloat(row.querySelector('input[name="qty"]').value);
+                    const price = parseFloat(row.querySelector('input[name="price"]').value);
+
+                    if (desc && qty > 0 && price >= 0) {
+                        invoiceItems.push({ desc, qty, price });
+                    }
+                });
+
+                if (invoiceItems.length === 0) {
+                    customModal('خطأ', 'الرجاء إضافة صنف واحد على الأقل وتحديد وصفه وكميته وسعره.', 'error');
+                    return;
+                }
+                
+                isSaving = true;
+
+                const taxRate = parseFloat(taxRateInput.value);
+                const subTotal = invoiceItems.reduce((sum, item) => sum + (item.qty * item.price), 0);
+                const tax = subTotal * (taxRate / 100);
+                const grandTotal = subTotal + tax;
+                const currentInvoiceId = form.getAttribute('data-invoice-id');
+
+                let timeToStore;
+                const now = new Date();
+                // Format time in 12-hour clock with seconds, Arabic locale for clean display
+                const formattedTime = now.toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
+
+                if (currentInvoiceId) {
+                    // If editing, preserve the old time unless the object is missing it
+                    const existingInvoice = invoices.find(inv => inv.id === currentInvoiceId);
+                    // Check if existingInvoice has invoiceTime property, if not, assign current time.
+                    timeToStore = existingInvoice.invoiceTime || formattedTime; 
+                } else {
+                    // New invoice gets current time
+                    timeToStore = formattedTime;
+                }
+
+
+                const newInvoice = {
+                    id: currentInvoiceId || Math.random().toString(36).substring(2, 9).toUpperCase(),
+                    date: document.getElementById('invoice-date').value,
+                    customerName: document.getElementById('customer-name').value,
+                    customerPhone: document.getElementById('customer-phone').value, // NEW FIELD
+                    items: invoiceItems,
+                    taxRate: taxRate,
+                    subTotal: subTotal,
+                    tax: tax,
+                    grandTotal: grandTotal,
+                    invoiceTime: timeToStore, // Store the time
+                };
+
+                let message = '';
+                if (currentInvoiceId) {
+                    // Update existing
+                    const index = invoices.findIndex(inv => inv.id === currentInvoiceId);
+                    if (index !== -1) {
+                        invoices[index] = newInvoice;
+                        message = `تم تحديث الفاتورة رقم ${newInvoice.id} بنجاح.`;
+                    }
+                } else {
+                    // Create new
+                    invoices.push(newInvoice);
+                    message = `تم حفظ الفاتورة رقم ${newInvoice.id} بنجاح!`;
+                }
+
+                saveInvoices();
+                customModal('نجاح', message, 'success');
+
+                if (actionType.includes('print')) {
+                    printInvoice(newInvoice.id);
+                    isSaving = false;
+                    return;
+                }
+
+                // Navigate back to the dashboard to update stats after save
+                if (currentInvoiceId) {
+                    renderView('invoices');
+                } else {
+                    renderView('dashboard'); // Re-render dashboard to clear form and update stats
+                }
+
+                isSaving = false;
+            };
+
+            // Bind action buttons
+            const btnSave = document.getElementById('btn-save');
+            const btnSavePrint = document.getElementById('btn-save-print');
+            const btnUpdate = document.getElementById('btn-update');
+            const btnUpdatePrint = document.getElementById('btn-update-print');
+
+            if (btnSave) btnSave.addEventListener('click', () => processInvoiceSubmission('save'));
+            if (btnSavePrint) btnSavePrint.addEventListener('click', () => processInvoiceSubmission('save-print'));
+            if (btnUpdate) btnUpdate.addEventListener('click', () => processInvoiceSubmission('update'));
+            if (btnUpdatePrint) btnUpdatePrint.addEventListener('click', () => processInvoiceSubmission('update-print'));
+
+        };
+        // --- 4.3 Previous Invoices Listeners ---
+        
+        /**
+         * Updates the content of the invoice table body based on a filtered list.
+         * @param {Array} filteredList - The invoices to display.
+         */
+        const updateInvoiceTableDisplay = (filteredList) => {
+            const tableBody = document.getElementById('invoices-table-body');
+            if (!tableBody) return;
+
+            tableBody.innerHTML = renderInvoiceTableBodyHtml(filteredList);
+        };
+
+        const setupPreviousInvoicesListeners = () => {
+            const searchInput = document.getElementById('invoice-search');
+            if (!searchInput) return;
+
+            searchInput.addEventListener('input', (e) => {
+                currentSearchQuery = e.target.value;
+                updateInvoiceTableDisplay(filterInvoices(currentSearchQuery));
+            });
+        };
+
+        // --- 4.4 Invoice View Listeners ---
+
+        const setupInvoiceViewListeners = (invoiceId) => {
+            // No listeners needed for view page
+        };
+        
+        // --- 4.5 Settings Listeners ---
+        const setupSettingsListeners = () => {
+            // Define the maximum size (1 MB)
+            const MAX_FILE_SIZE = 1048576; // 1 MB in bytes
+
+            // --- Delete Logo Listener ---
+            const deleteLogoBtn = document.getElementById('delete-logo-btn');
+            if (deleteLogoBtn) {
+                deleteLogoBtn.addEventListener('click', () => {
+                    settings.companyLogo = null;
+                    saveSettings();
+                    customModal('نجاح', 'تم حذف شعار المؤسسة بنجاح.', 'success');
+                    renderView('settings'); // Re-render to update the UI
+                });
+            }
+
+
+            // Company Settings Form
+            document.getElementById('company-settings-form').addEventListener('submit', async (e) => {
+                e.preventDefault();
+                
+                settings.companyName = document.getElementById('company-name').value;
+                settings.phone = document.getElementById('company-phone').value;
+                settings.location = document.getElementById('company-location').value;
+                settings.currencySymbol = document.getElementById('currency-symbol').value;
+
+                const logoInput = document.getElementById('logo-upload');
+                const logoFile = logoInput.files[0];
+
+                // Handle Logo Upload (Keep 1MB check)
+                if (logoFile) {
+                    if (logoFile.size > MAX_FILE_SIZE) {
+                        customModal('ملف كبير جداً', 'يجب أن يكون حجم شعار المؤسسة أقل من 1 ميغابايت (MB).', 'error');
+                        return; // Stop submission
+                    }
+                    try {
+                        // Attempt to convert the file
+                        settings.companyLogo = await fileToBase64(logoFile);
+                    } catch (error) {
+                        // The improved error handling from fileToBase64 should be caught here
+                        console.error("Logo file conversion failed:", error.message);
+                        customModal('خطأ في الشعار', `فشل تحويل ملف الشعار: ${error.message}`, 'error');
+                        return;
+                    }
+                } else if (logoInput.value === '' && settings.companyLogo) {
+                    // Do nothing, keep existing logo
+                } else if (logoInput.value === '' && !settings.companyLogo) {
+                    settings.companyLogo = null;
+                }
+                
+                saveSettings();
+                customModal('نجاح', 'تم حفظ إعدادات المؤسسة بنجاح.', 'success');
+                renderView('settings'); // Re-render the app to update sidebar/headers and show image previews
+            });
+
+            // --- Login Password Form ---
+            document.getElementById('login-password-form').addEventListener('submit', (e) => {
+                e.preventDefault();
+                const currentPass = document.getElementById('current-login-pass').value;
+                const newPass = document.getElementById('new-login-pass').value;
+                const confirmPass = document.getElementById('confirm-new-login-pass').value;
+
+                if (currentPass !== settings.loginPassword) {
+                    customModal('خطأ في الأمان', 'كلمة المرور الحالية للدخول غير صحيحة.', 'error');
+                    return;
+                }
+                
+                if (newPass !== confirmPass) {
+                    customModal('خطأ في الإدخال', 'كلمتا المرور الجديدتان غير متطابقتين.', 'error');
+                    return;
+                }
+                
+                if (newPass.length < 4) { 
+                    customModal('خطأ في الإدخال', 'يجب أن تكون كلمة المرور الجديدة 4 أحرف على الأقل.', 'error');
+                    return;
+                }
+
+                settings.loginPassword = newPass;
+                saveSettings();
+                document.getElementById('login-password-form').reset(); // Reset form
+                customModal('نجاح', 'تم تغيير كلمة مرور الدخول بنجاح.', 'success');
+            });
+
+            // --- Delete Password Form ---
+            document.getElementById('delete-password-form').addEventListener('submit', (e) => {
+                e.preventDefault();
+                const currentPass = document.getElementById('current-delete-pass').value;
+                const newPass = document.getElementById('new-delete-pass').value;
+                const confirmPass = document.getElementById('confirm-new-delete-pass').value;
+
+                if (currentPass !== settings.deletePassword) {
+                    customModal('خطأ في الأمان', 'كلمة المرور الحالية للحذف غير صحيحة.', 'error');
+                    return;
+                }
+
+                if (newPass !== confirmPass) {
+                    customModal('خطأ في الإدخال', 'كلمتا المرور الجديدتان غير متطابقتين.', 'error');
+                    return;
+                }
+                
+                if (newPass.length < 4) { 
+                    customModal('خطأ في الإدخال', 'يجب أن تكون كلمة المرور الجديدة 4 أحرف على الأقل.', 'error');
+                    return;
+                }
+
+                settings.deletePassword = newPass;
+                saveSettings();
+                document.getElementById('delete-password-form').reset(); // Reset form
+                customModal('نجاح', 'تم تغيير كلمة مرور الحذف بنجاح.', 'success');
+            });
+
+            // --- Delete All Invoices Listener ---
+            document.getElementById('delete-all-invoices-btn')?.addEventListener('click', handleDeleteAllData);
+        };
+
+        // --- 4.6 Recycle Bin Listeners (NEW) ---
+        const setupRecycleBinListeners = () => {
+            const tableBody = document.getElementById('deleted-invoices-table-body');
+            const selectAllCheckbox = document.getElementById('select-all-deleted');
+            const bulkRestoreBtn = document.getElementById('bulk-restore-btn');
+            const bulkDeleteBtn = document.getElementById('bulk-delete-btn');
+
+            /** Updates the state of bulk action buttons based on selection count. */
+            const updateBulkActionButtons = () => {
+                const count = selectedDeletedInvoices.size;
+                const isDisabled = count === 0;
+
+                bulkRestoreBtn.disabled = isDisabled;
+                bulkDeleteBtn.disabled = isDisabled;
+
+                bulkRestoreBtn.textContent = `استعادة المحدد (${count})`;
+                bulkDeleteBtn.textContent = `حذف المحدد نهائياً (${count})`;
+            };
+
+            /** Handles single checkbox change */
+            const handleCheckboxChange = (id, checked) => {
+                if (checked) {
+                    selectedDeletedInvoices.add(id);
+                } else {
+                    selectedDeletedInvoices.delete(id);
+                }
+                
+                // Update select all state
+                if (selectAllCheckbox) {
+                    selectAllCheckbox.checked = deletedInvoices.length > 0 && selectedDeletedInvoices.size === deletedInvoices.length;
+                }
+
+                updateBulkActionButtons();
+            };
+
+            // Listener for individual checkboxes
+            if (tableBody) {
+                tableBody.addEventListener('change', (e) => {
+                    const checkbox = e.target;
+                    if (checkbox.classList.contains('deleted-invoice-checkbox')) {
+                        const id = checkbox.getAttribute('data-id');
+                        handleCheckboxChange(id, checkbox.checked);
+                    }
+                });
+            }
+
+            // Listener for "Select All"
+            if (selectAllCheckbox) {
+                selectAllCheckbox.addEventListener('change', () => {
+                    const isChecked = selectAllCheckbox.checked;
+                    selectedDeletedInvoices.clear();
+
+                    document.querySelectorAll('.deleted-invoice-checkbox').forEach(cb => {
+                        cb.checked = isChecked;
+                        if (isChecked) {
+                            selectedDeletedInvoices.add(cb.getAttribute('data-id'));
+                        }
+                    });
+                    updateBulkActionButtons();
+                });
+            }
+
+            // Listener for Bulk Restore
+            if (bulkRestoreBtn) {
+                bulkRestoreBtn.addEventListener('click', async () => {
+                    await handleBulkRestore(Array.from(selectedDeletedInvoices));
+                });
+            }
+
+            // Listener for Bulk Permanent Delete
+            if (bulkDeleteBtn) {
+                bulkDeleteBtn.addEventListener('click', async () => {
+                    await handleBulkPermanentDelete(Array.from(selectedDeletedInvoices));
+                });
+            }
+
+            updateBulkActionButtons(); // Initial state update
+        };
+        
+        // ========================================================
+        // 5. CORE ACTIONS (DELETE, RESTORE, PRINT)
+        // ========================================================
+
+        /**
+         * Action for Soft Delete (Move to Recycle Bin) - No password required here.
+         * @param {string} id - Invoice ID to delete.
+         * @param {string} customerName - Customer name for confirmation message.
+         */
+        const handleSoftDeletePrompt = async (id, customerName) => {
+            const isConfirmed = await customModal(
+                'تأكيد نقل الفاتورة',
+                `هل أنت متأكد من نقل الفاتورة رقم ${id} للعميل ${customerName} إلى سلة المهملات؟`,
+                'prompt',
+                true 
+            );
+
+            if (!isConfirmed) return;
+
+            const index = invoices.findIndex(inv => inv.id === id);
+            if (index !== -1) {
+                const deletedItem = invoices.splice(index, 1)[0];
+                deletedInvoices.push(deletedItem); // Add to deleted list
+                
+                saveInvoices();
+                saveDeletedInvoices();
+                
+                customModal('نجاح', `تم نقل الفاتورة رقم ${id} إلى سلة المهملات.`, 'success');
+                renderView('invoices'); 
+            } else {
+                customModal('خطأ', 'لم يتم العثور على الفاتورة النشطة للحذف.', 'error');
+            }
+        };
+
+        /**
+         * Action for Restoring a single invoice from Recycle Bin.
+         * @param {string} id - Invoice ID to restore.
+         * @param {string} customerName - Customer name for confirmation message.
+         */
+        const handleRestoreInvoice = async (id, customerName) => {
+            const isConfirmed = await customModal(
+                'تأكيد الاستعادة',
+                `هل أنت متأكد من استعادة الفاتورة رقم ${id} للعميل ${customerName} إلى قائمة الفواتير النشطة؟`,
+                'prompt',
+                true 
+            );
+
+            if (!isConfirmed) return;
+            
+            await executeRestore([id]);
+        };
+        
+        /**
+         * Action for Bulk Restore from Recycle Bin.
+         * @param {Array<string>} ids - Array of Invoice IDs to restore.
+         */
+        const handleBulkRestore = async (ids) => {
+            if (ids.length === 0) return;
+
+            const isConfirmed = await customModal(
+                'تأكيد الاستعادة الجماعية',
+                `هل أنت متأكد من استعادة ${ids.length} فاتورة محددة إلى قائمة الفواتير النشطة؟`,
+                'prompt',
+                true 
+            );
+
+            if (!isConfirmed) return;
+            
+            await executeRestore(ids);
+        };
+        
+        /**
+         * Core logic to move invoices from deletedInvoices to invoices.
+         * @param {Array<string>} ids - Array of Invoice IDs to restore.
+         */
+        const executeRestore = (ids) => {
+            const restoredItems = deletedInvoices.filter(inv => ids.includes(inv.id));
+            const newDeletedInvoices = deletedInvoices.filter(inv => !ids.includes(inv.id));
+            
+            invoices.push(...restoredItems);
+            deletedInvoices = newDeletedInvoices;
+
+            saveInvoices();
+            saveDeletedInvoices();
+            selectedDeletedInvoices.clear();
+            
+            customModal('نجاح', `تم استعادة ${ids.length} فاتورة بنجاح.`, 'success');
+            renderView('recycle_bin');
+        };
+
+        /**
+         * Prompts for deletion password and permanently deletes a single invoice.
+         * @param {string} id - Invoice ID to delete permanently.
+         * @param {string} customerName - Customer name for confirmation message.
+         */
+        const handlePermanentDeletePrompt = async (id, customerName) => {
+            const password = await customModal(
+                'حذف نهائي! (يتطلب كلمة المرور)', 
+                `أنت على وشك حذف الفاتورة رقم ${id} للعميل ${customerName} نهائياً. الرجاء إدخال كلمة مرور الحذف للمتابعة.`, 
+                'confirm'
+            );
+
+            if (password === settings.deletePassword) {
+                const isConfirmed = await customModal(
+                    'تحذير: تأكيد نهائي!',
+                    `هل أنت متأكد تماماً من حذف الفاتورة رقم ${id} نهائياً؟ هذا الإجراء لا يمكن التراجع عنه!`,
+                    'prompt', 
+                    true
+                );
+
+                if (!isConfirmed) {
+                    customModal('إلغاء', 'تم إلغاء عملية الحذف النهائي.', 'info');
+                    return;
+                }
+
+                await executePermanentDelete([id]);
+            } else if (password !== false) {
+                customModal('خطأ', 'كلمة مرور الحذف غير صحيحة.', 'error');
+            }
+        };
+
+        /**
+         * Prompts for deletion password and permanently deletes multiple selected invoices.
+         * @param {Array<string>} ids - Array of Invoice IDs to delete permanently.
+         */
+        const handleBulkPermanentDelete = async (ids) => {
+            if (ids.length === 0) return;
+
+            const password = await customModal(
+                'حذف جماعي نهائي! (يتطلب كلمة المرور)', 
+                `أنت على وشك حذف ${ids.length} فاتورة محددة نهائياً. الرجاء إدخال كلمة مرور الحذف للمتابعة.`, 
+                'confirm'
+            );
+
+            if (password === settings.deletePassword) {
+                const isConfirmed = await customModal(
+                    'تحذير: تأكيد نهائي للحذف الجماعي!',
+                    `هل أنت متأكد تماماً من حذف ${ids.length} فاتورة نهائياً؟ هذا الإجراء لا يمكن التراجع عنه!`,
+                    'prompt', 
+                    true
+                );
+
+                if (!isConfirmed) {
+                    customModal('إلغاء', 'تم إلغاء عملية الحذف الجماعي النهائي.', 'info');
+                    return;
+                }
+
+                await executePermanentDelete(ids);
+            } else if (password !== false) {
+                customModal('خطأ', 'كلمة مرور الحذف غير صحيحة. تم إلغاء العملية.', 'error');
+            }
+        };
+        
+        /**
+         * Core logic to permanently remove invoices from deletedInvoices.
+         * @param {Array<string>} ids - Array of Invoice IDs to delete permanently.
+         */
+        const executePermanentDelete = (ids) => {
+             const initialLength = deletedInvoices.length;
+             deletedInvoices = deletedInvoices.filter(inv => !ids.includes(inv.id));
+             const deletedCount = initialLength - deletedInvoices.length;
+
+             if (deletedCount > 0) {
+                 saveDeletedInvoices();
+                 selectedDeletedInvoices.clear();
+                 customModal('نجاح', `تم حذف ${deletedCount} فاتورة نهائياً.`, 'success');
+                 renderView('recycle_bin');
+             } else {
+                 customModal('خطأ', 'لم يتم العثور على أي فواتير للحذف النهائي.', 'error');
+             }
+        };
+        
+        /**
+         * Handles the complete deletion of all active and deleted data.
+         */
+        const handleDeleteAllData = async () => {
+            const totalCount = invoices.length + deletedInvoices.length;
+            if (totalCount === 0) {
+                customModal('معلومة', 'لا توجد بيانات لحذفها حالياً.', 'info');
+                return;
+            }
+
+            // First: Prompt for password
+            const password = await customModal(
+                'تأكيد مسح كل شيء!',
+                `سيتم مسح جميع البيانات (الفواتير النشطة والمحذوفة) البالغ عددها (${totalCount}) بشكل دائم. الرجاء إدخال كلمة مرور الحذف لتأكيد العملية.`,
+                'confirm'
+            );
+
+            if (password === settings.deletePassword) {
+                // Second: Are you sure? (The confirmation)
+                const isConfirmed = await customModal(
+                    'تحذير: تأكيد أخير للمسح الشامل!',
+                    'هل أنت متأكد تماماً من حذف جميع بيانات الفواتير النشطة والمحذوفة؟ هذا الإجراء لا يمكن التراجع عنه!',
+                    'prompt', 
+                    true
+                );
+
+                if (!isConfirmed) {
+                    customModal('إلغاء', 'تم إلغاء عملية المسح الشامل.', 'info');
+                    return;
+                }
+
+                // Execute deletion
+                invoices = [];
+                deletedInvoices = [];
+                saveInvoices();
+                saveDeletedInvoices();
+                customModal('نجاح', 'تم مسح جميع البيانات نهائياً بنجاح.', 'success');
+                // Re-render the settings page to reflect the change
+                renderView('settings');
+                
+            } else if (password !== false) {
+                customModal('خطأ في الأمان', 'كلمة مرور الحذف غير صحيحة. تم إلغاء عملية المسح الشامل.', 'error');
+            }
+        };
+
+
+        /**
+         * Triggers the browser's print function for a specific invoice.
+         * @param {string} id - Invoice ID to print.
+         */
+        const printInvoice = (id) => {
+            // Render the view, which sets up the print area
+            renderView('view_invoice', { invoiceId: id }); 
+            // Wait slightly for DOM update before printing
+            setTimeout(() => window.print(), 200); 
+            // We return the user to the invoices list after a brief delay
+            setTimeout(() => renderView('invoices'), 500); 
+        };
+
+        /**
+         * Prompts for confirmation before logging out.
+         */
+        const promptLogout = async () => {
+            const isConfirmed = await customModal(
+                'تأكيد الخروج',
+                'هل أنت متأكد من رغبتك في تسجيل الخروج والعودة إلى شاشة الدخول؟',
+                'prompt',
+                true
+            );
+
+            if (isConfirmed) {
+                renderView('login');
+            }
+        };
+
+        // ========================================================
+        // 6. INITIALIZATION
+        // ========================================================
+
+        loadInitialData();
+        renderView('login');
+
+    </script>
+</body>
+</html>
